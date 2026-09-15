@@ -1,7 +1,5 @@
 package sparkx.sparkshop.knowledge.prompt;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import sparkx.sparkshop.knowledge.intent.QueryIntent;
 
@@ -21,8 +19,6 @@ import java.util.Map;
  */
 @Component
 public class PromptPlanner {
-
-    private static final Logger log = LoggerFactory.getLogger(PromptPlanner.class);
 
     private final PromptTemplateLoader templateLoader;
 
@@ -44,10 +40,12 @@ public class PromptPlanner {
      */
     public String buildSystemPrompt(PromptScene scene, QueryIntent intent, List<String> intentTpls,
                                     String kbContext, String mcpContext) {
-        // 1. 意图专用模板：闲聊/追问等非检索意图各有差异化人设，覆盖场景模板
-        String intentPath = intentTemplatePath(intent);
-        if (intentPath != null) {
-            return templateLoader.render(intentPath, Map.of());
+        // 1. 闲聊用人设模板。追问若已召回证据，走场景模板（KB/MCP），避免 EMPTY 人设盖掉检索约束。
+        if (intent == QueryIntent.CHITCHAT) {
+            return templateLoader.render("answer-intent-chitchat.st", Map.of());
+        }
+        if (intent == QueryIntent.FOLLOW_UP && (scene == PromptScene.EMPTY)) {
+            return templateLoader.render("answer-intent-follow-up.st", Map.of());
         }
 
         // 2. 意图级节点覆盖：单意图且配了 promptTemplate → 完全覆盖
@@ -70,22 +68,6 @@ public class PromptPlanner {
     public String buildSystemPrompt(PromptScene scene, List<String> intentTpls,
                                     String kbContext, String mcpContext) {
         return buildSystemPrompt(scene, null, intentTpls, kbContext, mcpContext);
-    }
-
-    /**
-     * 意图专用模板路径。仅对需要差异化人设的非检索意图返回模板名，其余返回 null（走场景路由）。
-     *
-     * <p>这里只覆盖人设/口吻维度，不覆盖信息边界（KB 证据约束仍在场景模板里）。
-     * CHITCHAT（闲聊）/ FOLLOW_UP（追问）这两类高频且原 EMPTY 模板不够贴切的意图启用专用模板；
-     * 其他意图（SUMMARIZE/IMAGE_ONLY/DOC_ONLY 等）暂沿用场景默认。
-     */
-    private String intentTemplatePath(QueryIntent intent) {
-        if (intent == null) return null;
-        return switch (intent) {
-            case CHITCHAT -> "answer-intent-chitchat.st";
-            case FOLLOW_UP -> "answer-intent-follow-up.st";
-            default -> null;
-        };
     }
 
     /** 场景 → 默认模板路径 */

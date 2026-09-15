@@ -10,7 +10,7 @@ public enum QueryIntent {
     WEB_SEARCH("web_search", false, "联网搜索"),
     KB_SEARCH("kb_search", true, "知识库检索"),       // 默认
     CLARIFICATION("clarification", true, "需澄清"),
-    FOLLOW_UP("follow_up", false, "上下文追问"),
+    FOLLOW_UP("follow_up", true, "上下文追问"),
     IMAGE_ONLY("image_only", false, "纯图片理解"),
     DOC_ONLY("doc_only", false, "纯文档理解"),
     CHITCHAT("chitchat", false, "闲聊");

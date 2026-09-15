@@ -25,8 +25,17 @@ public class RuleBasedIntentRouter {
             Pattern.CASE_INSENSITIVE | Pattern.MULTILINE);
 
     private static final Pattern FOLLOW_UP = Pattern.compile(
-            "^(上面|刚才|刚刚|你说的|第[一二三四五六七八九十]点|继续|展开|详细).*(说|讲|提|列|展开).*$",
-            Pattern.MULTILINE);
+            "^(?:" +
+            "(?:上面|刚才|刚刚|你说的|第[一二三四五六七八九十\\d]+点).{0,12}(?:说|讲|提|列|展开|详细)" +
+            "|(?:继续|展开)(?:说|讲|一下)?" +
+            "|(?:详细说说|再详细点|再说说|具体怎么做)" +
+            "|(?:那|然后|所以|接下来|还有)?(?:怎么办|怎么处理|怎么解决|怎么弄|该怎么办)" +
+            "|(?:然后呢|所以呢|接下来呢|还有呢|那然后呢)" +
+            ")[?？。.!！~～]*$",
+            Pattern.CASE_INSENSITIVE | Pattern.MULTILINE);
+
+    private static final Pattern SHORT_ANAPHORA = Pattern.compile(
+            "^(那|这|它|这个|那个|上面|刚才|刚刚).{0,10}$");
 
     /**
      * 实时信息意图：需明确指向"外部实时数据"才命中。
@@ -71,10 +80,20 @@ public class RuleBasedIntentRouter {
 
         if (GREETING.matcher(q).matches()) return QueryIntent.GREETING;
         if (CHITCHAT.matcher(q).matches()) return QueryIntent.CHITCHAT;
-        if (FOLLOW_UP.matcher(q).matches()) return QueryIntent.FOLLOW_UP;
+        if (isFollowUp(q)) return QueryIntent.FOLLOW_UP;
         if (WEB_HINT.matcher(q).find()) return QueryIntent.WEB_SEARCH;
 
         return null;   // 交给 LLM
+    }
+
+    public boolean isFollowUp(String query) {
+        if (query == null) return false;
+        String q = query.trim().replaceAll("[?？。.!！~～\\s]+$", "");
+        if (q.isEmpty()) return false;
+        if (FOLLOW_UP.matcher(q).matches()) return true;
+        return q.length() <= 12
+                && SHORT_ANAPHORA.matcher(q).matches()
+                && QUESTION_HINT.matcher(q).find();
     }
 
     /**

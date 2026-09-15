@@ -4,6 +4,7 @@ import sparkx.sparkshop.knowledge.config.RagProperties;
 import sparkx.sparkshop.knowledge.entity.ConversationMessageEntity;
 import sparkx.sparkshop.knowledge.infra.LLMService;
 import sparkx.sparkshop.knowledge.infra.chat.LlmChatRequest;
+import sparkx.sparkshop.knowledge.intent.RuleBasedIntentRouter;
 import sparkx.sparkshop.knowledge.mapper.ConversationMessageMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -64,6 +65,7 @@ public class MultiQuestionRewriteService {
             - 拆分只针对"并列的多个独立问题"（如"介绍下OA和数据安全要求"→两个子问题）
             - 单个问题不拆分（should_split=false）
             - 子问题保持独立可检索，不互相依赖
+            - 「那怎么办」「然后呢」「具体怎么做」必须结合对话历史改写成独立可检索的完整问题，禁止原样输出这些短追问
 
             # 输出格式（严格 JSON，禁止其他文字）
             {
@@ -78,16 +80,19 @@ public class MultiQuestionRewriteService {
     private final LLMService llmService;
     private final QueryTermMappingService termMappingService;
     private final ConversationMessageMapper messageMapper;
+    private final RuleBasedIntentRouter ruleRouter;
     private final ObjectMapper mapper = new ObjectMapper();
     private final boolean enabled;
 
     public MultiQuestionRewriteService(LLMService llmService,
                                        QueryTermMappingService termMappingService,
                                        ConversationMessageMapper messageMapper,
+                                       RuleBasedIntentRouter ruleRouter,
                                        RagProperties props) {
         this.llmService = llmService;
         this.termMappingService = termMappingService;
         this.messageMapper = messageMapper;
+        this.ruleRouter = ruleRouter;
         this.enabled = props.getRetrieval().isEnableRewrite();
     }
 
@@ -147,12 +152,51 @@ public class MultiQuestionRewriteService {
             LlmChatRequest req = LlmChatRequest.ofUser(
                     prompt + "\n\n用户问题：" + normalized, 0.1, 0.3);
             String resp = llmService.chat(req, modelId, modelName);
-            return parseRewriteAndSplit(resp, normalized);
+            return ensureFollowUpExpanded(normalized, history,
+                    parseRewriteAndSplit(resp, normalized));
         } catch (Exception e) {
             // LLM 失败降级为归一化结果
             log.debug("[Rewrite] LLM 改写失败，降级为归一化结果: {}", e.getMessage());
-            return new RewriteResult(normalized, ruleBasedSplit(normalized));
+            return ensureFollowUpExpanded(normalized, history,
+                    new RewriteResult(normalized, ruleBasedSplit(normalized)));
         }
+    }
+
+    /**
+     * 短追问改写失败时，用上一轮用户原问题拼成可检索问句。
+     * 避免「那怎么办」原样进入意图分类和检索。
+     */
+    private RewriteResult ensureFollowUpExpanded(String original, String history, RewriteResult result) {
+        if (history == null || history.isBlank() || result == null) return result;
+        String rewritten = result.rewrittenQuestion();
+        boolean stillBare = isBareFollowUp(original) && isBareFollowUp(rewritten);
+        if (!stillBare && rewritten != null && rewritten.length() > original.length() + 4) {
+            return result;
+        }
+        if (!isBareFollowUp(original) && !isBareFollowUp(rewritten)) {
+            return result;
+        }
+        String lastUser = lastUserUtterance(history);
+        if (lastUser == null || lastUser.isBlank() || lastUser.equals(original)) return result;
+        String expanded = lastUser + "，" + original;
+        log.info("[Rewrite:diag] 短追问回退拼上文 lastUser=\"{}\" followUp=\"{}\"", lastUser, original);
+        return new RewriteResult(expanded, List.of(expanded));
+    }
+
+    private boolean isBareFollowUp(String q) {
+        if (q == null) return false;
+        String t = q.trim();
+        return t.length() <= 16 && ruleRouter.isFollowUp(t);
+    }
+
+    private static String lastUserUtterance(String history) {
+        String last = null;
+        for (String line : history.split("\\R")) {
+            if (line.regionMatches(true, 0, "user: ", 0, 6)) {
+                last = line.substring(6).trim();
+            }
+        }
+        return last;
     }
 
     /** 解析 {rewrite, should_split, sub_questions}，失败兜底 */

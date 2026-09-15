@@ -17,7 +17,9 @@ import org.springframework.stereotype.Component;
  *    跳过后续 Retrieve/Rerank/Merge/Fallback，直接由 GenerateStage 用 LLM 做纯对话应答。
  *    「你好」「你是谁」「谢谢」这类不查知识的输入不应走检索，否则查不到会触发兜底，
  *    出现「先白调兜底 LLM 又被覆盖」的错乱。
- *  - 追问/联网（FOLLOW_UP/WEB_SEARCH）：规则命中即短路，不走检索。
+ *  - 追问（FOLLOW_UP）：规则命中后仍走检索。短追问先由 RewriteSplitStage 结合历史扩成完整问题，
+ *    再检索；禁止把「那怎么办」当新会话去澄清。
+ *  - 联网（WEB_SEARCH）：规则命中即短路，不走检索。
  *  - 规则未命中：默认走 KB 检索，由 TreeIntentStage 做 LLM 精分类与路由。
  *
  * 结果写入 ctx.intent（仅用于 needsRetrieval 判定），决定后续 stage 是否执行。
@@ -53,7 +55,7 @@ public class IntentStage implements PipelineStage {
 
         // 2. 闲聊/问候 → 短路为 CHITCHAT（needsRetrieval=false），跳过检索链路，直接走纯 LLM 对话。
         //    GREETING 归一为 CHITCHAT（两者都不检索，语义一致：不查知识的对话应答）。
-        //    规则命中追问/联网（FOLLOW_UP/WEB_SEARCH）保留原意图，由各自短路逻辑处理。
+        //    规则命中追问（FOLLOW_UP）保留原意图并继续检索；联网仍短路。
         //    规则未命中（null）→ 默认 KB_SEARCH，走检索 + 意图树精分类。
         if (intent == QueryIntent.GREETING || intent == QueryIntent.CHITCHAT) {
             intent = QueryIntent.CHITCHAT;

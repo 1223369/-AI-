@@ -5,6 +5,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import sparkx.sparkshop.knowledge.intent.NodeScore;
+import sparkx.sparkshop.knowledge.intent.QueryIntent;
+import sparkx.sparkshop.knowledge.intent.RuleBasedIntentRouter;
 import sparkx.sparkshop.knowledge.intent.VagueQueryClarifier;
 import sparkx.sparkshop.knowledge.pipeline.PipelineContext;
 import sparkx.sparkshop.knowledge.pipeline.PipelineStage;
@@ -45,9 +47,11 @@ public class VagueQueryClarifyStage implements PipelineStage {
     private static final double HIGH_CONFIDENCE_SKIP_SCORE = 0.6;
 
     private final VagueQueryClarifier clarifier;
+    private final RuleBasedIntentRouter ruleRouter;
 
-    public VagueQueryClarifyStage(VagueQueryClarifier clarifier) {
+    public VagueQueryClarifyStage(VagueQueryClarifier clarifier, RuleBasedIntentRouter ruleRouter) {
         this.clarifier = clarifier;
+        this.ruleRouter = ruleRouter;
     }
 
     @Override
@@ -59,6 +63,11 @@ public class VagueQueryClarifyStage implements PipelineStage {
         if (!ctx.needsRetrieval()) return false;
         // 已触发歧义引导短路的话术不再重复澄清
         if (ctx.isGuidancePrompt()) return false;
+        // 短追问已有上一轮语境，禁止把「那怎么办」当新问题去反问
+        if (ctx.getIntent() == QueryIntent.FOLLOW_UP || ruleRouter.isFollowUp(ctx.getOriginalQuery())) {
+            log.info("[VagueClarify:diag] 跳过澄清判定（追问承接上文）query=\"{}\"", ctx.getOriginalQuery());
+            return false;
+        }
 
         List<NodeScore> subIntents = ctx.getSubIntents();
         int count = subIntents == null ? 0 : subIntents.size();
@@ -82,7 +91,7 @@ public class VagueQueryClarifyStage implements PipelineStage {
     @Override
     public StageResult execute(PipelineContext ctx) {
         long t0 = System.currentTimeMillis();
-        String query = ctx.getOriginalQuery();
+        String query = ctx.getMainQuery();
         VagueQueryClarifier.ClarifyDecision decision = clarifier.clarify(query, ctx.getSubIntents());
 
         if (decision.isVague()) {
