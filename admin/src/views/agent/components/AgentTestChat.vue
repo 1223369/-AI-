@@ -231,7 +231,7 @@
   import { useTypewriter } from '@/composables/useTypewriter';
   import RagTraceDrawer from '@/views/agent/components/RagTraceDrawer.vue';
   import LiveStagePanel from '@/views/chat/components/LiveStagePanel.vue';
-  import * as echarts from 'echarts';
+  import echarts from '@/utils/lib/echarts';
 
   marked.use({ breaks: true, gfm: true });
 

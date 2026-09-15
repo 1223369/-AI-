@@ -29,7 +29,7 @@ import {
 
 import { SVGRenderer } from 'echarts/renderers';
 
-echarts.use([
+const components = [
   LegendComponent,
   TitleComponent,
   TooltipComponent,
@@ -52,6 +52,13 @@ echarts.use([
   TimelineComponent,
   CalendarComponent,
   GraphicComponent,
-]);
+];
+for (const c of components) {
+  try {
+    echarts.use(c);
+  } catch {
+    // 全量 echarts 已注册过同一组件时会抛 exists，忽略即可
+  }
+}
 
 export default echarts;

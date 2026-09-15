@@ -55,7 +55,7 @@
 <script setup lang="ts">
   import { ref, computed, nextTick, h } from 'vue';
   import { useMessage, NTag } from 'naive-ui';
-  import * as echarts from 'echarts';
+  import echarts from '@/utils/lib/echarts';
   import {
     getIngestionSummary,
     type IngestionSummary,
