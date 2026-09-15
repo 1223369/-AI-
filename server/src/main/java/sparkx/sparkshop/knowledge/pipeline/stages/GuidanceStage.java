@@ -2,6 +2,7 @@ package sparkx.sparkshop.knowledge.pipeline.stages;
 
 import sparkx.sparkshop.knowledge.intent.GuidanceDecision;
 import sparkx.sparkshop.knowledge.intent.IntentGuidanceService;
+import sparkx.sparkshop.knowledge.intent.QueryIntent;
 import sparkx.sparkshop.knowledge.pipeline.PipelineContext;
 import sparkx.sparkshop.knowledge.pipeline.PipelineStage;
 import org.slf4j.Logger;
@@ -34,8 +35,9 @@ public class GuidanceStage implements PipelineStage {
 
     @Override
     public boolean shouldRun(PipelineContext ctx) {
-        // 仅在有≥2个意图分类候选时触发
-        return ctx.getSubIntents() != null && ctx.getSubIntents().size() >= 2;
+        if (ctx.getSubIntents() == null || ctx.getSubIntents().size() < 2) return false;
+        if (ctx.getIntent() == QueryIntent.FOLLOW_UP) return false;
+        return true;
     }
 
     @Override

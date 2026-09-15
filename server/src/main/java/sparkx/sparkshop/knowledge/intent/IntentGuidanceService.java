@@ -3,6 +3,7 @@ package sparkx.sparkshop.knowledge.intent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import sparkx.sparkshop.knowledge.service.impl.McpServerServiceImpl;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -82,6 +83,10 @@ public class IntentGuidanceService {
         if (containsExplicitDomain(question, ranked)) {
             return GuidanceDecision.none();
         }
+        // 同 MCP 服务的多个工具不是互斥品类，一起跑比让用户选更合理
+        if (sameMcpServer(ranked)) {
+            return GuidanceDecision.none();
+        }
         // 3. 分数比 ≥ 阈值 → 直接判歧义
         if (ratio >= RATIO_THRESHOLD) {
             return GuidanceDecision.prompt(buildPrompt(question, ranked));
@@ -126,6 +131,21 @@ public class IntentGuidanceService {
             return (coll != null && !coll.isBlank()) ? coll : ("kb_no_collection:" + node.getId());
         }
         return "node:" + node.getId();
+    }
+
+    private boolean sameMcpServer(List<NodeScore> ranked) {
+        String serverId = null;
+        for (NodeScore s : ranked) {
+            if (s.node() == null || !s.node().isMCP()) return false;
+            String[] parsed = McpServerServiceImpl.parseFullId(s.node().getMcpToolId());
+            if (parsed == null) return false;
+            if (serverId == null) {
+                serverId = parsed[0];
+            } else if (!serverId.equals(parsed[0])) {
+                return false;
+            }
+        }
+        return serverId != null;
     }
 
     /** 用户问题是否含明确品类名（任一候选名/路径片段出现在问题中） */

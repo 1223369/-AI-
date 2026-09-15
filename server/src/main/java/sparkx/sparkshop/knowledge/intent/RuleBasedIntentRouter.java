@@ -34,6 +34,11 @@ public class RuleBasedIntentRouter {
             ")[?？。.!！~～]*$",
             Pattern.CASE_INSENSITIVE | Pattern.MULTILINE);
 
+    private static final Pattern CONTEXT_FOLLOW_UP = Pattern.compile(
+            "(?:查询|查一下|看一下|分析).{0,20}(?:他|她|它|其|这个|那个)" +
+            "|(?:他|她|它|其|这个|那个).{0,20}(?:昨天|最近|刚才|上面)",
+            Pattern.CASE_INSENSITIVE);
+
     private static final Pattern SHORT_ANAPHORA = Pattern.compile(
             "^(那|这|它|这个|那个|上面|刚才|刚刚).{0,10}$");
 
@@ -91,6 +96,7 @@ public class RuleBasedIntentRouter {
         String q = query.trim().replaceAll("[?？。.!！~～\\s]+$", "");
         if (q.isEmpty()) return false;
         if (FOLLOW_UP.matcher(q).matches()) return true;
+        if (CONTEXT_FOLLOW_UP.matcher(q).find()) return true;
         return q.length() <= 12
                 && SHORT_ANAPHORA.matcher(q).matches()
                 && QUESTION_HINT.matcher(q).find();

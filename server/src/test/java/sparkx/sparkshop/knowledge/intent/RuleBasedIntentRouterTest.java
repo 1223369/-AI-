@@ -17,5 +17,8 @@ class RuleBasedIntentRouterTest {
         assertEquals(QueryIntent.FOLLOW_UP, router.tryClassify("具体怎么做"));
         assertTrue(router.isFollowUp("怎么办"));
         assertTrue(QueryIntent.FOLLOW_UP.needsRetrieval());
+        assertEquals(QueryIntent.FOLLOW_UP, router.tryClassify("查询他昨天的状态并分析其相关数据"));
+        assertEquals(QueryIntent.FOLLOW_UP, router.tryClassify("那它现在在线吗"));
+        org.junit.jupiter.api.Assertions.assertNull(router.tryClassify("查一下设备5624的状态"));
     }
 }
