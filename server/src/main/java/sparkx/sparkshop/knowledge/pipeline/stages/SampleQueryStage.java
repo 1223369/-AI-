@@ -26,9 +26,11 @@ import java.util.Optional;
  * <p>★ 阈值优先级：智能体独立 {@code sampleQueryThreshold} 非空用它，否则回退全局
  * {@code sample_query_config.similarity_threshold}（默认 0.85）。
  *
- * <p>★ 短路约定（与 {@code GuidanceStage}/{@code VagueQueryClarifyStage} 一致的三步走）：
- * tokenConsumer 推答案 → setAnswer → 返回 COMPLETE。命中 GenerateStage.shouldRun
- * （{@code ctx.getAnswer()==null}）自动跳过生成。匹配失败/未命中返回 CONTINUE，主链路照常跑。
+     * <p>★ 匹配限时 2s：命中才短路；超时/失败 CONTINUE 走 RAG，避免 embedding 把整轮对话拖死。
+     *
+     * <p>★ 短路约定（与 {@code GuidanceStage}/{@code VagueQueryClarifyStage} 一致的三步走）：
+     * tokenConsumer 推答案 → setAnswer → 返回 COMPLETE。命中 GenerateStage.shouldRun
+     * （{@code ctx.getAnswer()==null}）自动跳过生成。匹配失败/未命中返回 CONTINUE，主链路照常跑。
  */
 @Component
 @Order(5)

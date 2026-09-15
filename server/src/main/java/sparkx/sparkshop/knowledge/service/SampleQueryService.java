@@ -62,7 +62,7 @@ public interface SampleQueryService {
     /**
      * 按用户 query 向量匹配最相似的「已向量化 + 启用」样例。
      * <p>阈值优先级：{@code thresholdOverride} 非空用它，否则回退全局 {@code similarity_threshold}（默认 0.85）。
-     * <p>匹配失败/未命中返回 {@link java.util.Optional#empty()}，不抛异常，由调用方决定后续走向。
+     * <p>匹配限时约 2s，超时/失败/未命中均返回 {@link java.util.Optional#empty()}，不抛异常。
      *
      * @param query              用户原始 query
      * @param thresholdOverride  智能体独立阈值覆盖（可空）

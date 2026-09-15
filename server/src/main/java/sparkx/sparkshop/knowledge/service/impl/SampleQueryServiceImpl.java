@@ -19,6 +19,7 @@ import org.apache.poi.ss.usermodel.WorkbookFactory;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -51,6 +52,10 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * 样例查询业务实现。
@@ -80,6 +85,9 @@ public class SampleQueryServiceImpl implements SampleQueryService {
     /** 默认相似度阈值（与表 DDL DEFAULT 对齐） */
     private static final java.math.BigDecimal DEFAULT_THRESHOLD = new java.math.BigDecimal("0.850");
 
+    /** 问答路径样例匹配超时：超时未命中则立刻走 RAG，避免 embedding 把整轮对话拖到 20s+ */
+    private static final long MATCH_TIMEOUT_MS = 2000;
+
     @Resource
     private SampleQueryMapper sampleQueryMapper;
 
@@ -94,6 +102,10 @@ public class SampleQueryServiceImpl implements SampleQueryService {
 
     @Resource
     private RedissonClient redisson;
+
+    @Resource
+    @Qualifier("ragTaskExecutor")
+    private Executor ragTaskExecutor;
 
     /**
      * 自注入代理对象：用于在 {@link #vectorizeBatch} 中调 {@link #doVectorizeBatchAsync}（{@code @Async}）。
@@ -414,33 +426,40 @@ public class SampleQueryServiceImpl implements SampleQueryService {
         if (query == null || query.isBlank()) {
             return Optional.empty();
         }
-        // 阈值：智能体独立阈值优先，否则回退全局 sample_query_config.similarity_threshold（默认 0.85）
+        try {
+            return CompletableFuture.supplyAsync(() -> matchNow(query, thresholdOverride), ragTaskExecutor)
+                    .orTimeout(MATCH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    .join();
+        } catch (Exception e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            if (cause instanceof TimeoutException || e instanceof TimeoutException) {
+                log.warn("[SampleQuery] match 超时 {}ms，走 RAG q={}", MATCH_TIMEOUT_MS, query);
+            } else {
+                log.warn("[SampleQuery] match 失败 q={} : {}", query, cause.getMessage());
+            }
+            return Optional.empty();
+        }
+    }
+
+    private Optional<SampleQuery> matchNow(String query, Double thresholdOverride) {
         SampleQueryConfig cfg = getConfig();
         double threshold = thresholdOverride != null ? thresholdOverride
                 : (cfg.getSimilarityThreshold() != null ? cfg.getSimilarityThreshold().doubleValue() : 0.85);
-        try {
-            // 用全局配置的 embedding 模型把 query 向量化（与样例入库用同一模型，向量空间一致）
-            EmbeddingModel embModel = embeddingModelProvider.resolveByModelId(
-                    cfg.getEmbeddingModelId(), cfg.getEmbeddingModelName());
-            Embedding emb = embModel.embed(TextSegment.from(query)).content();
-            String pgVec = SampleQueryIndexer.toPgVector(emb);
-            // 只查「已向量化 + 启用」的记录，score >= threshold 才返回，取最相似的一条
-            List<Map<String, Object>> rows = sampleQueryMapper.vectorSearch(pgVec, threshold, 1);
-            if (rows == null || rows.isEmpty()) {
-                return Optional.empty();
-            }
-            Map<String, Object> row = rows.get(0);
-            SampleQuery sq = new SampleQuery();
-            Object idVal = row.get("id");
-            sq.setId(idVal instanceof Number ? ((Number) idVal).longValue() : Long.valueOf(String.valueOf(idVal)));
-            sq.setQuestion((String) row.get("question"));
-            sq.setAnswer((String) row.get("answer"));
-            return Optional.of(sq);
-        } catch (Exception e) {
-            // 匹配失败不阻断主链路：返回 empty，SampleQueryStage 会 CONTINUE 走正常 RAG
-            log.warn("[SampleQuery] match 失败 q={} : {}", query, e.getMessage());
+        EmbeddingModel embModel = embeddingModelProvider.resolveByModelId(
+                cfg.getEmbeddingModelId(), cfg.getEmbeddingModelName());
+        Embedding emb = embModel.embed(TextSegment.from(query)).content();
+        String pgVec = SampleQueryIndexer.toPgVector(emb);
+        List<Map<String, Object>> rows = sampleQueryMapper.vectorSearch(pgVec, threshold, 1);
+        if (rows == null || rows.isEmpty()) {
             return Optional.empty();
         }
+        Map<String, Object> row = rows.get(0);
+        SampleQuery sq = new SampleQuery();
+        Object idVal = row.get("id");
+        sq.setId(idVal instanceof Number ? ((Number) idVal).longValue() : Long.valueOf(String.valueOf(idVal)));
+        sq.setQuestion((String) row.get("question"));
+        sq.setAnswer((String) row.get("answer"));
+        return Optional.of(sq);
     }
 
 
