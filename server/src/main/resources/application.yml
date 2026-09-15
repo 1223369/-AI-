@@ -129,8 +129,8 @@ app:
       #   刷出虚高 ts_rank_cd」的噪声。0.5：双路平权，适合关键词命中性强的场景。
       # 0.8+：几乎只信向量，关键词路只作微调。
       hybrid-vector-weight: 0.7
-      # 单条检索通道超时（毫秒）。图谱抽实体 LLM 卡住时超时丢弃该通道，向量路照常返回。
-      channel-timeout-ms: 15000
+      # 单条检索通道超时（毫秒）。图谱抽实体卡住时丢弃该通道，向量路照常返回。
+      channel-timeout-ms: 5000
     # ★ 多通道融合（RRF）配置——由 FusionPostProcessor（order=3，去重后/retrank前）消费。
     # 各通道返回的 Content 经 RetrieveStage.annotateWithRrfMetadata 注入 rrf_channel/rrf_weight/rrf_rank，
     # 这里按通道类型覆盖权重（通道自带 getWeight() 作为代码默认，配置优先）。

@@ -145,7 +145,7 @@ public class RagProperties {
          * 单条检索通道最长等待（毫秒）。图谱抽实体 LLM 卡住时，超时丢弃该通道，
          * 向量/关键词结果照常返回，避免整段检索被最慢一路拖到 2 分钟。
          */
-        private long channelTimeoutMs = 15000;
+        private long channelTimeoutMs = 5000;
 
         public int getEmbeddingTopK() { return embeddingTopK; }
         public void setEmbeddingTopK(int embeddingTopK) { this.embeddingTopK = embeddingTopK; }

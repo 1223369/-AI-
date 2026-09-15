@@ -76,10 +76,15 @@ public class VagueQueryClarifyStage implements PipelineStage {
 
         // ★ 候选=1 且最高分高置信命中时跳过：意图已明确，无需再花一次 LLM 判模糊性。
         //   例：命中"OA规章制度咨询"分数 0.67 的问题，再判 CLEAR 纯属浪费数秒。
-        if (count == 1 && subIntents.get(0).score() >= HIGH_CONFIDENCE_SKIP_SCORE) {
-            log.info("[VagueClarify:diag] 跳过澄清判定（意图高置信命中 score={}）query=\"{}\"",
-                    String.format("%.2f", subIntents.get(0).score()), ctx.getOriginalQuery());
-            return false;
+        if (count == 1) {
+            NodeScore only = subIntents.get(0);
+            String onlyId = only.node() == null ? null : only.node().getId();
+            if (only.score() >= HIGH_CONFIDENCE_SKIP_SCORE
+                    || "sys_default_retrieval".equals(onlyId)) {
+                log.info("[VagueClarify:diag] 跳过澄清判定（意图明确或默认检索 score={} id={}）query=\"{}\"",
+                        String.format("%.2f", only.score()), onlyId, ctx.getOriginalQuery());
+                return false;
+            }
         }
 
         String query = ctx.getOriginalQuery();

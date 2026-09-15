@@ -34,6 +34,21 @@ class RetrieveStageSkipKbTest {
         assertFalse(RetrieveStage.skipKbChannels(List.of(mcp("stock", 0.75), kb("doc", 0.70))));
     }
 
+    @Test
+    void defaultKbDoesNotRunGraph() {
+        IntentNode n = new IntentNode();
+        n.setId("sys_default_retrieval");
+        n.setKind(IntentNode.IntentKind.KB);
+        assertFalse(sparkx.sparkshop.knowledge.graph.KnowledgeGraphChannel.shouldRunGraph(
+                List.of(new NodeScore(n, 0.50))));
+    }
+
+    @Test
+    void strongUserKbRunsGraph() {
+        assertTrue(sparkx.sparkshop.knowledge.graph.KnowledgeGraphChannel.shouldRunGraph(
+                List.of(kb("oa-rules", 0.80))));
+    }
+
     private static NodeScore mcp(String id, double score) {
         IntentNode n = new IntentNode();
         n.setId(id);

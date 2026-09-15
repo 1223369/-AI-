@@ -130,13 +130,27 @@ public class KnowledgeGraphChannel implements GraphChannel {
         return retrieveLocal(kbId, entityNames, config, threshold, topK, hopDepth, secondHopWeight, docId);
     }
 
+    /** 图谱抽实体要调 LLM，只在用户配置的高置信 KB 意图时启用 */
+    static final double MIN_GRAPH_INTENT_SCORE = 0.6;
+
+    public static boolean shouldRunGraph(List<NodeScore> scores) {
+        if (scores == null || scores.isEmpty()) {
+            return false;
+        }
+        return scores.stream().anyMatch(s -> {
+            if (s == null || s.node() == null || !s.node().isKB() || s.score() < MIN_GRAPH_INTENT_SCORE) {
+                return false;
+            }
+            String id = s.node().getId();
+            return id != null && !id.startsWith("sys_");
+        });
+    }
+
     @Override
     public boolean isEnabled(RetrievalContext ctx) {
         List<NodeScore> scores = ctx.getIntentScores();
-        if (scores != null && !scores.isEmpty()) {
-            boolean hasMcp = scores.stream().anyMatch(s -> s.node() != null && s.node().isMCP());
-            boolean hasKb = scores.stream().anyMatch(s -> s.node() != null && s.node().isKB());
-            if (hasMcp && !hasKb) return false;
+        if (!shouldRunGraph(scores)) {
+            return false;
         }
         // ★ 基础设施前置：Neo4j 未配置（NoopGraphRepository 兜底）时直接禁用通道，
         // 避免后续 retrieve 空跑 LLM 抽 query 实体。
