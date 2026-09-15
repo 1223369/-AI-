@@ -1,0 +1,163 @@
+# 本地构建编排：postgres + minio + mineru + backend(本地build) + frontend(本地build)
+#
+# 仅启动依赖服务（不启动 backend/frontend）：
+#   docker compose up -d postgres minio
+#
+# 自建 MinerU 需 GPU，且镜像较大。无 GPU 环境请：
+#   1) 用云端 MinerU（后台「知识库 → 外部服务配置」新增 category=mineru_cloud），跳过本服务；
+#   2) 或临时注释下方 mineru 服务块。
+#
+# 国内拉取：MinerU/MinIO 均走 docker.1ms.run 加速源，避免 Docker Hub 直连超时。
+# 如已有本地镜像或自建 registry，把 image 改回 opendatalab/mineru:latest / minio/minio 即可。
+name: sparkx-app
+
+services:
+  postgres:
+    image: crpi-35xwxmfks2ouwnqn.cn-shanghai.personal.cr.aliyuncs.com/sparkx/pgvector:15
+    container_name: sparkx-postgres
+    environment:
+      POSTGRES_USER: sparkx
+      POSTGRES_PASSWORD: 123123
+      POSTGRES_DB: sparkx
+    volumes:
+      - ./runtime_data/pg-data:/var/lib/postgresql/data
+      - ./sql/sparkx.sql:/docker-entrypoint-initdb.d/sparkx.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sparkx -d sparkx"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # 企业云盘 MinIO 对象存储（sparkx-drive bucket）
+  # 与 application.yml 的 sparkx.minio.* 对齐：
+  #   endpoint  http://127.0.0.1:9000   access/secret  minioadmin   bucket  sparkx-drive
+  minio:
+    # MinIO 已从 Docker Hub 下架，官方源改为 quay.io
+    image: quay.io/minio/minio:latest
+    container_name: sparkx-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - ./runtime_data/minio-data:/data
+    ports:
+      - "9000:9000"   # S3 API（sparkx 后端连接）
+      - "9001:9001"   # Web Console（http://localhost:9001）
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 知识图谱 Neo4j 图数据库
+  # sparkx 后端从 ext_service_config 表（category=neo4j_self）读取连接信息：
+  #   uri = bolt://127.0.0.1:7687   username = neo4j   password = neo4j123
+  # （KnowledgeGraphConfig 启动时 verifyConnectivity，配了就必须连通，否则后端启动失败）
+  neo4j:
+    # 国内镜像加速源；自建 registry 可改回 neo4j:5-community
+    image: docker.1ms.run/library/neo4j:5-community
+    container_name: sparkx-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/neo4j123          # 与 sparkx.sql 中 neo4j_self 的 password 对齐
+      NEO4J_PLUGINS: '["apoc"]'            # APOC 过程插件（部分图谱操作依赖）
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+    volumes:
+      - ./runtime_data/neo4j-data:/data
+      - ./runtime_data/neo4j-logs:/logs
+    ports:
+      - "7474:7474"   # 浏览器控制台（http://localhost:7474）
+      - "7687:7687"   # Bolt 协议（sparkx 后端连接）
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 15
+      start_period: 180s
+
+  # Redis 缓存（验证码 + 权限缓存 + Redisson 分布式锁）
+  # 与 application.yml 的 spring.data.redis.* 对齐：
+  #   host=127.0.0.1  port=6379  database=0  无密码
+  redis:
+    image: docker.1ms.run/library/redis:7-alpine
+    container_name: sparkx-redis
+    volumes:
+      - ./runtime_data/redis-data:/data
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 自建 MinerU 文档解析服务（PDF/图片 → Markdown）
+  # sparkx 后端在「外部服务配置」中按 category=mineru_self 读取 endpoint 调用：
+  #   endpoint = http://127.0.0.1:8000   （MinerUConfig 的 SSRF 白名单对本机回环放行）
+  # 镜像基于 vllm，需 NVIDIA GPU。无 GPU 改用云端 mineru_cloud。
+  mineru:
+    # 官方镜像在国内拉取易超时，走加速源；自建 registry 可改回 opendatalab/mineru:latest
+    image: docker.1ms.run/opendatalab/mineru:latest
+    container_name: sparkx-mineru
+    profiles: ["api"]          # 用 profile 隔离：默认 docker compose up 不启动，需 --profile api
+    ports:
+      - "8000:8000"
+    environment:
+      MINERU_MODEL_SOURCE: local
+    entrypoint: mineru-api
+    command:
+      - --host=0.0.0.0
+      - --port=8000
+      # 绑定 0.0.0.0 后默认禁用 *-http-client 后端的 server_url。
+      # sparkx 自建同机部署时后端走 127.0.0.1，SSRF 校验放行；
+      # 若要用 vlm-http-client/hybrid-http-client，取消下行注释并知悉 SSRF 风险：
+      # - --allow-public-http-client
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 120s       # vllm 模型加载慢，首次健康检查放宽
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]   # 多卡改为 ["0","1"]
+              capabilities: [gpu]
+
+  backend:
+    build: ./backend
+    container_name: sparkx-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # 激活 docker profile：用服务名连接 postgres/redis/minio，配置见 application-docker.yml
+      SPRING_PROFILES_ACTIVE: docker
+    ports:
+      - "7026:7026"
+
+  frontend:
+    build: ./frontend
+    container_name: sparkx-frontend
+    ports:
+      - "8189:80"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend/app.config.js:/usr/share/nginx/html/app.config.js

@@ -1,0 +1,55 @@
+package sparkx.sparkshop.system.validate;
+
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.Size;
+import lombok.Data;
+
+import java.io.Serializable;
+
+/**
+ * 管理员新增/编辑参数
+ */
+@Data
+public class AdminUserValidate implements Serializable {
+
+    /**
+     * 管理员 id（编辑时必填）
+     */
+    @Schema(description = "管理员 id（编辑时必填）")
+    private Integer id;
+
+    /**
+     * 昵称
+     */
+    @Schema(description = "昵称")
+    @NotEmpty(message = "昵称不能为空")
+    @Size(max = 50, message = "昵称过长")
+    private String nickname;
+
+    /**
+     * 登录账号
+     */
+    @Schema(description = "登录账号")
+    @NotEmpty(message = "账号不能为空")
+    @Size(min = 2, max = 30, message = "账号长度 2-30")
+    private String account;
+
+    /**
+     * 密码（新增时必填；编辑时为空表示不改密码）
+     */
+    @Schema(description = "密码（新增时必填；编辑时为空表示不改密码）")
+    private String password;
+
+    /**
+     * 状态 1:正常 2:禁用
+     */
+    @Schema(description = "状态 1:正常 2:禁用")
+    private Integer status;
+
+    /**
+     * 头像
+     */
+    @Schema(description = "头像")
+    private String avatar;
+}

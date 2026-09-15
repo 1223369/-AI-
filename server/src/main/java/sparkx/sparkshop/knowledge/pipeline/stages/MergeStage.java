@@ -1,0 +1,70 @@
+package sparkx.sparkshop.knowledge.pipeline.stages;
+
+import sparkx.sparkshop.knowledge.pipeline.PipelineContext;
+import sparkx.sparkshop.knowledge.pipeline.PipelineStage;
+import dev.langchain4j.rag.content.Content;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.core.annotation.Order;
+import org.springframework.stereotype.Component;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * 合并阶段 —— 文档未给代码，按时序图逻辑自研。
+ *
+ * 职责：
+ * 1. 对重排结果按文本去重（多查询变体可能召回相同内容）
+ * 2. 父子分块的父块展开已在检索阶段由 ParentExpansionPostProcessor（order=2）完成，
+ *    到达此处的 Content 若来自父子库即为父块内容；普通检索则做截断到合理上下文长度
+ * 3. 结果写入 ctx.mergeResult，供生成阶段使用
+ */
+@Component
+@Order(80)
+public class MergeStage implements PipelineStage {
+
+    private static final Logger log = LoggerFactory.getLogger(MergeStage.class);
+
+    /** 单次注入上下文的字符上限，避免超长 */
+    private static final int MAX_CONTEXT_CHARS = 12000;
+
+    @Override
+    public String name() { return "merge"; }
+
+    @Override
+    public boolean shouldRun(PipelineContext ctx) {
+        return ctx.needsRetrieval()
+                && ctx.getRerankResult() != null
+                && !ctx.getRerankResult().isEmpty();
+    }
+
+    @Override
+    public StageResult execute(PipelineContext ctx) throws Exception {
+        List<Content> reranked = ctx.getRerankResult();
+
+        // 1. 按文本去重（保留顺序）
+        Map<String, Content> dedup = new LinkedHashMap<>();
+        int totalChars = 0;
+        for (Content c : reranked) {
+            String text = c.textSegment().text();
+            if (dedup.containsKey(text)) continue;
+            if (totalChars + text.length() > MAX_CONTEXT_CHARS) {
+                log.info("[Merge] 达到上下文上限 {}，截断", MAX_CONTEXT_CHARS);
+                break;
+            }
+            dedup.put(text, c);
+            totalChars += text.length();
+        }
+
+        List<Content> merged = List.copyOf(dedup.values());
+        ctx.setMergeResult(merged);
+        log.info("[Merge] reranked={} merged={} chars={}", reranked.size(), merged.size(), totalChars);
+
+        if (merged.isEmpty()) {
+            return StageResult.FALLBACK;
+        }
+        return StageResult.CONTINUE;
+    }
+}
