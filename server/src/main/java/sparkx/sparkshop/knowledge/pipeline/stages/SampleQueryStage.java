@@ -46,11 +46,18 @@ public class SampleQueryStage implements PipelineStage {
 
     @Override
     public boolean shouldRun(PipelineContext ctx) {
-        // 仅智能体显式开启样例查询，且有非空原始 query 时执行
         AgentOverrides ov = ctx.getAgentOverrides();
-        return ov != null
-                && Boolean.TRUE.equals(ov.getSampleQueryEnabled())
-                && StrUtil.isNotBlank(ctx.getOriginalQuery());
+        if (ov == null
+                || !Boolean.TRUE.equals(ov.getSampleQueryEnabled())
+                || StrUtil.isBlank(ctx.getOriginalQuery())) {
+            return false;
+        }
+        // 库空仍打 embedding 会白烧十几秒；没有可匹配样例直接跳过
+        if (!sampleQueryService.hasIndexedSamples()) {
+            log.info("[SampleQuery] 样例库为空，跳过匹配");
+            return false;
+        }
+        return true;
     }
 
     @Override

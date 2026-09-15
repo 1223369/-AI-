@@ -14,7 +14,8 @@ import java.util.List;
  *
  * 意图模糊/缺失/置信度不足时启用全局混合检索。
  * 互补规则（与 IntentDirectedChannel）：
- *  - 意图为空 → 启用全局兜底
+ *  - 无意图 → 启用全局兜底
+ *  - 纯 MCP 无 KB → 不启用（避免股票/设备查询空跑知识库）
  *  - 最高分 < 0.6 → 启用全局兜底
  *  - 单意图且分 < 0.8 → 启用全局兜底（中等置信度，定向+全局双通道）
  */
@@ -40,12 +41,14 @@ public class VectorKeywordHybridChannel implements ConditionalRetrievalChannel {
 
     @Override
     public boolean isEnabled(RetrievalContext ctx) {
-        List<NodeScore> kbScores = ctx.getIntentScores().stream()
-                .filter(s -> s.node().isKB()).toList();
-        // 无 KB 意图 → 全局兜底
-        if (kbScores.isEmpty()) return true;
+        List<NodeScore> scores = ctx.getIntentScores();
+        List<NodeScore> kbScores = scores.stream()
+                .filter(s -> s.node() != null && s.node().isKB()).toList();
+        if (kbScores.isEmpty()) {
+            boolean hasMcp = scores.stream().anyMatch(s -> s.node() != null && s.node().isMCP());
+            return !hasMcp;
+        }
         double top = kbScores.stream().mapToDouble(NodeScore::score).max().orElse(0);
-        // 最高分 < 0.6 → 兜底；单意图且分 < 0.8 → 兜底
         return top < GLOBAL_FALLBACK_TOP_THRESHOLD
                 || (kbScores.size() == 1 && top < SINGLE_INTENT_STRONG_THRESHOLD);
     }

@@ -159,26 +159,60 @@ public class RetrieveStage implements PipelineStage {
     /**
      * 单个子问题检索：KB 走多通道并行 + 后处理；MCP 走工具调用。
      *
-     * ★ 此方法在 CompletableFuture.supplyAsync 内执行，任何异常都会被 .exceptionally() 静默吞掉。
-     *   因此不要在此方法内加日志/诊断代码——任何额外代码都可能因异常阻止核心检索逻辑执行。
+     * <p>MCP 高置信且无有效 KB 意图时跳过知识库通道，避免空跑向量/图谱把工具调用拖到通道超时。
      */
     private SubQResult retrieveForSubQuestion(String sq, PipelineContext ctx, List<NodeScore> intents) {
-        RetrievalContext rctx = buildRetrievalContext(sq, ctx, intents);
-        Query query = Query.from(sq, Metadata.from(UserMessage.from(""), null, null));
+        List<NodeScore> mcpIntents = intents == null ? List.of()
+                : intents.stream().filter(s -> s != null && s.node() != null && s.node().isMCP()).toList();
+        boolean skipKb = skipKbChannels(intents);
 
-        // ★ 无条件执行检索：意图分类只用于精准路由（IntentDirectedChannel），
-        //   不用于「要不要检索」的开关。
-        List<Content> chunks = executeChannels(query, rctx, ctx);
+        List<Content> chunks = List.of();
+        if (!skipKb) {
+            RetrievalContext rctx = buildRetrievalContext(sq, ctx, intents);
+            Query query = Query.from(sq, Metadata.from(UserMessage.from(""), null, null));
+            chunks = executeChannels(query, rctx, ctx);
+        } else {
+            log.info("[Retrieve:subQuestion] MCP 高置信，跳过知识库通道 sq=\"{}\"", sq);
+        }
 
-        // MCP 意图 → 工具调用
         String mcpData = null;
-        if (intents != null) {
-            List<NodeScore> mcpIntents = intents.stream().filter(s -> s.node().isMCP()).toList();
-            if (!mcpIntents.isEmpty() && mcpToolService != null) {
-                mcpData = mcpToolService.executeTools(sq, mcpIntents);
-            }
+        if (!mcpIntents.isEmpty() && mcpToolService != null) {
+            mcpData = mcpToolService.executeTools(sq, mcpIntents);
         }
         return new SubQResult(sq, chunks, mcpData);
+    }
+
+    /**
+     * MCP 独占或显著强于 KB 时不跑知识库通道。
+     * 无意图 / 纯 KB / MCP 与 KB 接近时仍检索。
+     */
+    static boolean skipKbChannels(List<NodeScore> intents) {
+        if (intents == null || intents.isEmpty()) {
+            return false;
+        }
+        double topMcp = 0;
+        double topKb = 0;
+        boolean hasMcp = false;
+        boolean hasKb = false;
+        for (NodeScore s : intents) {
+            if (s == null || s.node() == null) {
+                continue;
+            }
+            if (s.node().isMCP()) {
+                hasMcp = true;
+                topMcp = Math.max(topMcp, s.score());
+            } else if (s.node().isKB()) {
+                hasKb = true;
+                topKb = Math.max(topKb, s.score());
+            }
+        }
+        if (!hasMcp) {
+            return false;
+        }
+        if (!hasKb) {
+            return true;
+        }
+        return topMcp >= 0.8 && (topMcp - topKb) >= 0.15;
     }
 
     /** ★ 多通道并行：filter(isEnabled) → parallel retrieve → join

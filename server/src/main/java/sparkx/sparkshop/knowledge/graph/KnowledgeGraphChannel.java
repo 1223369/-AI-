@@ -18,6 +18,7 @@ import sparkx.sparkshop.knowledge.ingest.KgEntityIndexer;
 import sparkx.sparkshop.knowledge.infra.EmbeddingModelProvider;
 import sparkx.sparkshop.knowledge.mapper.ChunkMapper;
 import sparkx.sparkshop.knowledge.mapper.KgConfigMapper;
+import sparkx.sparkshop.knowledge.intent.NodeScore;
 import sparkx.sparkshop.knowledge.mapper.KgEntityMapper;
 import sparkx.sparkshop.knowledge.retrieval.RetrievalContext;
 
@@ -131,6 +132,12 @@ public class KnowledgeGraphChannel implements GraphChannel {
 
     @Override
     public boolean isEnabled(RetrievalContext ctx) {
+        List<NodeScore> scores = ctx.getIntentScores();
+        if (scores != null && !scores.isEmpty()) {
+            boolean hasMcp = scores.stream().anyMatch(s -> s.node() != null && s.node().isMCP());
+            boolean hasKb = scores.stream().anyMatch(s -> s.node() != null && s.node().isKB());
+            if (hasMcp && !hasKb) return false;
+        }
         // ★ 基础设施前置：Neo4j 未配置（NoopGraphRepository 兜底）时直接禁用通道，
         // 避免后续 retrieve 空跑 LLM 抽 query 实体。
         // 性能考虑：此处在每条消息检索路径调用，用 instanceof 做廉价判断

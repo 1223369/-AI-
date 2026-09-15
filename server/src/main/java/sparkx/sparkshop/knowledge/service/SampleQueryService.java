@@ -69,4 +69,9 @@ public interface SampleQueryService {
      * @return 命中的样例（含 answer），或 empty
      */
     java.util.Optional<SampleQuery> match(String query, Double thresholdOverride);
+
+    /**
+     * 是否存在「已向量化 + 启用」的样例。库空时 SampleQueryStage 应直接跳过，避免白打 embedding。
+     */
+    boolean hasIndexedSamples();
 }

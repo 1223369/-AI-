@@ -397,6 +397,19 @@ public class SampleQueryServiceImpl implements SampleQueryService {
     }
 
     @Override
+    public boolean hasIndexedSamples() {
+        try {
+            Long cnt = sampleQueryMapper.selectCount(new LambdaQueryWrapper<SampleQuery>()
+                    .eq(SampleQuery::getVectorized, 1)
+                    .eq(SampleQuery::getStatus, 1));
+            return cnt != null && cnt > 0;
+        } catch (Exception e) {
+            log.warn("[SampleQuery] 检查样例库失败: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
     public Optional<SampleQuery> match(String query, Double thresholdOverride) {
         if (query == null || query.isBlank()) {
             return Optional.empty();
