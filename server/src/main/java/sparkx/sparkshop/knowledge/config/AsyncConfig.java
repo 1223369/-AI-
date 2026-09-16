@@ -47,6 +47,15 @@ public class AsyncConfig {
         return ttlFixed("rag-retrieve-", CPU * 4, 200);
     }
 
+    /**
+     * 混合检索内部两路并行（关键词 + 向量）。
+     * 独立池，避免 RetrieveStage 已占用 ragRetrievalExecutor 时再嵌套提交导致死锁。
+     */
+    @Bean("hybridRetrieveExecutor")
+    public ExecutorService hybridRetrieveExecutor() {
+        return ttlFixed("hybrid-retrieve-", CPU * 4, 200);
+    }
+
     /** 子问题级并行（每个子问题独立线程） */
     @Bean("ragContextExecutor")
     public ExecutorService ragContextExecutor() {

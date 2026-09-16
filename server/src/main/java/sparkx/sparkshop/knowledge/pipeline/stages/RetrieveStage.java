@@ -67,7 +67,7 @@ public class RetrieveStage implements PipelineStage {
     private final List<SearchResultPostProcessor> postProcessors;
     private final McpToolService mcpToolService;
     private final ExecutorService retrievalExecutor;
-    private final long channelTimeoutMs;
+    private final RagProperties.Retrieval retrievalProps;
 
     public RetrieveStage(HybridContentRetriever retriever,
                          RagProperties props,
@@ -84,8 +84,7 @@ public class RetrieveStage implements PipelineStage {
         this.postProcessors = postProcessors != null ? postProcessors : List.of();
         this.mcpToolService = mcpToolService;
         this.retrievalExecutor = retrievalExecutor;
-        long timeout = props.getRetrieval().getChannelTimeoutMs();
-        this.channelTimeoutMs = timeout > 0 ? timeout : 15000;
+        this.retrievalProps = props.getRetrieval();
     }
 
     @Override
@@ -238,41 +237,44 @@ public class RetrieveStage implements PipelineStage {
             return retrieveWithOverrides(query, primaryKbId(rctx), ctx);
         }
         List<CompletableFuture<List<Content>>> futures = active.stream()
-                .map(ch -> CompletableFuture.supplyAsync(
-                        () -> {
-                            long start = System.currentTimeMillis();
-                            try {
-                                List<Content> raw = ch.retrieve(query, rctx);
-                                log.info("[Retrieve:channel] {} 完成 hits={} cost={}ms",
-                                        ch.getName(), raw == null ? 0 : raw.size(),
-                                        System.currentTimeMillis() - start);
-                                return annotateWithRrfMetadata(raw, ch);
-                            } catch (Exception e) {
-                                log.warn("[Retrieve:channel] 通道 {} 检索异常 cost={}ms: {}",
-                                        ch.getName(), System.currentTimeMillis() - start, e.getMessage(), e);
-                                return List.<Content>of();
-                            }
-                        },
-                        retrievalExecutor)
-                        .orTimeout(channelTimeoutMs, TimeUnit.MILLISECONDS)
-                        .exceptionally(ex -> {
-                            Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                            if (cause instanceof TimeoutException || ex instanceof TimeoutException) {
-                                log.warn("[Retrieve:channel] 通道 {} 超时 {}ms，丢弃本路结果，其它通道继续",
-                                        ch.getName(), channelTimeoutMs);
-                            } else {
-                                log.warn("[Retrieve:channel] 通道 {} 失败: {}", ch.getName(), cause.getMessage());
-                            }
-                            return List.of();
-                        }))
+                .map(ch -> {
+                    long timeoutMs = ch.timeoutMs(retrievalProps);
+                    return CompletableFuture.supplyAsync(
+                            () -> {
+                                long start = System.currentTimeMillis();
+                                try {
+                                    List<Content> raw = ch.retrieve(query, rctx);
+                                    log.info("[Retrieve:channel] {} 完成 hits={} cost={}ms timeout={}ms",
+                                            ch.getName(), raw == null ? 0 : raw.size(),
+                                            System.currentTimeMillis() - start, timeoutMs);
+                                    return annotateWithRrfMetadata(raw, ch);
+                                } catch (Exception e) {
+                                    log.warn("[Retrieve:channel] 通道 {} 检索异常 cost={}ms: {}",
+                                            ch.getName(), System.currentTimeMillis() - start, e.getMessage(), e);
+                                    return List.<Content>of();
+                                }
+                            },
+                            retrievalExecutor)
+                            .orTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+                            .exceptionally(ex -> {
+                                Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                                if (cause instanceof TimeoutException || ex instanceof TimeoutException) {
+                                    log.warn("[Retrieve:channel] 通道 {} 超时 {}ms，丢弃本路结果，其它通道继续",
+                                            ch.getName(), timeoutMs);
+                                } else {
+                                    log.warn("[Retrieve:channel] 通道 {} 失败: {}", ch.getName(), cause.getMessage());
+                                }
+                                return List.of();
+                            });
+                })
                 .toList();
         List<Content> merged = futures.stream().map(CompletableFuture::join)
                 .flatMap(List::stream).toList();
-        log.info("[Retrieve:channel:diag] 各通道命中={} timeoutMs={}",
+        log.info("[Retrieve:channel:diag] 各通道命中={} timeouts={}",
                 futures.stream().map(f -> {
                     try { return f.join().size(); } catch (Exception e) { return -1; }
                 }).toList(),
-                channelTimeoutMs);
+                active.stream().map(ch -> ch.getName() + "=" + ch.timeoutMs(retrievalProps)).toList());
         return merged;
     }
 

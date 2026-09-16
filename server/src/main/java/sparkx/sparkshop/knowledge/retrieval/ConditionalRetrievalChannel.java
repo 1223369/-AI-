@@ -48,5 +48,19 @@ public interface ConditionalRetrievalChannel {
     /** 通道类型 */
     ChannelType getType();
 
+    /**
+     * 本通道等待上限。图谱用短超时；混合/定向通道内部已拆关键词/向量超时，外层用向量超时兜底。
+     */
+    default long timeoutMs(sparkx.sparkshop.knowledge.config.RagProperties.Retrieval retrieval) {
+        if (retrieval == null) {
+            return 5000;
+        }
+        return switch (getType()) {
+            case KNOWLEDGE_GRAPH -> retrieval.getChannelTimeoutMs() > 0 ? retrieval.getChannelTimeoutMs() : 5000;
+            case KEYWORD -> retrieval.getKeywordTimeoutMs() > 0 ? retrieval.getKeywordTimeoutMs() : 1000;
+            default -> (retrieval.getVectorTimeoutMs() > 0 ? retrieval.getVectorTimeoutMs() : 20000) + 500;
+        };
+    }
+
     enum ChannelType { INTENT_DIRECTED, HYBRID_GLOBAL, KEYWORD, PARENT_CHILD, KNOWLEDGE_GRAPH }
 }

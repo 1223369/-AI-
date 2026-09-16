@@ -15,6 +15,7 @@ import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import dev.langchain4j.rag.query.Query;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -26,6 +27,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 /**
@@ -50,15 +55,18 @@ public class HybridContentRetriever implements ContentRetriever {
     private final EmbeddingModelProvider embeddingModelProvider;
     private final RagProperties props;
     private final ChunkMapper chunkMapper;
+    private final ExecutorService hybridExecutor;
 
     public HybridContentRetriever(JdbcTemplate jdbc,
                                    EmbeddingModelProvider embeddingModelProvider,
                                    RagProperties props,
-                                   ChunkMapper chunkMapper) {
+                                   ChunkMapper chunkMapper,
+                                   @Qualifier("hybridRetrieveExecutor") ExecutorService hybridExecutor) {
         this.jdbc = jdbc;
         this.embeddingModelProvider = embeddingModelProvider;
         this.props = props;
         this.chunkMapper = chunkMapper;
+        this.hybridExecutor = hybridExecutor;
     }
 
     @Override
@@ -150,11 +158,9 @@ public class HybridContentRetriever implements ContentRetriever {
                 ? vectorThresholdOverride : props.getRetrieval().getVectorThreshold();
         int overFetch = Math.max(topK * 5, 50);
         // 检索方式归一化：null/空/非法值 都按 mix（向后兼容，与改造前行为一致）
-        String mode = (modeOverride == null || modeOverride.isBlank())
+        String rawMode = (modeOverride == null || modeOverride.isBlank())
                 ? "mix" : modeOverride.toLowerCase().trim();
-        if (!"embedding".equals(mode) && !"text".equals(mode)) {
-            mode = "mix";   // 兜底未知值
-        }
+        String mode = "embedding".equals(rawMode) || "text".equals(rawMode) ? rawMode : "mix";
 
         // ★ kb_id / doc_id 过滤条件（向量路、关键词路共用）。
         // kbId/docId 均为业务生成的 UUID hex，不含特殊字符，额外 strip 单引号防注入。
@@ -175,64 +181,33 @@ public class HybridContentRetriever implements ContentRetriever {
             }
         }
         String kbFilter = filter.toString();
+        long kwTimeout = props.getRetrieval().getKeywordTimeoutMs() > 0
+                ? props.getRetrieval().getKeywordTimeoutMs() : 1000;
+        long vecTimeout = props.getRetrieval().getVectorTimeoutMs() > 0
+                ? props.getRetrieval().getVectorTimeoutMs() : 20000;
 
-        // 1. 向量检索（mode=embedding 或 mix 时执行；text 模式跳过省一次 embedding 调用）
-        List<Map<String, Object>> vectorHits = List.of();
-        if (!"text".equals(mode)) {
-            EmbeddingModel embeddingModel = embeddingModelProvider.resolve(kbId);
-            // 5x 过度召回
-            Embedding qEmb = embeddingModel.embed(qText).content();
-            String vec = embToArray(qEmb);
-            // ★ 向量直接嵌入 SQL 字符串（embToArray 产出的格式安全，无注入风险），
-            //   而非走 JDBC ? 参数绑定 —— PostgreSQL JDBC 驱动对 CAST(? AS vector) 的参数绑定
-            //   会把 ? 误解析为 JSON 操作符，导致 bad SQL grammar。
-            //   kg_entity 的 MyBatis #{emb} 走的是不同绑定路径所以没问题，JdbcTemplate 的 ? 不行。
-            String vecLiteral = "'" + vec + "'::vector";
-            String vectorSql = "SELECT id, content, 1 - (embedding <=> " + vecLiteral + ") AS score, metadata "
-                    + "FROM chunks "
-                    + "WHERE " + kbFilter + " "
-                    + "AND 1 - (embedding <=> " + vecLiteral + ") >= ? "
-                    + "ORDER BY embedding <=> " + vecLiteral + " "
-                    + "LIMIT ?";
-            try {
-                vectorHits = jdbc.queryForList(vectorSql, vectorThreshold, overFetch);
-            } catch (Exception e) {
-                log.warn("[HybridRetrieve] 向量检索失败（库未就绪?）: {}", e.getMessage());
-                vectorHits = List.of();
-            }
-        }
+        CompletableFuture<List<Map<String, Object>>> kwFuture = "embedding".equals(mode)
+                ? CompletableFuture.completedFuture(List.of())
+                : CompletableFuture.supplyAsync(
+                        () -> searchKeyword(qText, kbFilter, overFetch, mode, keywordThresholdOverride),
+                        hybridExecutor);
+        CompletableFuture<List<Map<String, Object>>> vecFuture = "text".equals(mode)
+                ? CompletableFuture.completedFuture(List.of())
+                : CompletableFuture.supplyAsync(
+                        () -> searchVector(qText, kbId, kbFilter, vectorThreshold, overFetch),
+                        hybridExecutor);
 
-        // 2. 关键词检索（mode=text 或 mix 时执行；embedding 模式跳过）
-        //    query 先用 HanLP 在 Java 端预分词，再交 websearch_to_tsquery('simple', ?)。
-        //    simple config 不做语干还原，靠「Java 已切好词 + 整词等值」命中中文。
-        List<Map<String, Object>> kwHits = List.of();
-        if (!"embedding".equals(mode)) {
-            String tsQuery = TsVectorGenerator.toTsQuery(qText);
-            String kwSql = "SELECT id, content, "
-                    + "ts_rank_cd(tsv, websearch_to_tsquery('simple', ?)) AS score, metadata "
-                    + "FROM chunks "
-                    + "WHERE " + kbFilter + " "
-                    + "AND tsv @@ websearch_to_tsquery('simple', ?) "
-                    + "ORDER BY score DESC "
-                    + "LIMIT ?";
-            try {
-                // ★ mix 模式下关键词路按 keywordThreshold 过滤弱命中：ts_rank_cd 没有分数下限，高频词
-                // （公司/员工）反复出现的长 chunk 会刷出虚高分，混入融合会污染排序
-                // （与 Milvus BM25 的 drop_ratio_search 同思路：弱命中直接砍掉）。
-                // text 单路模式不过滤，保持「全文检索不使用相似度阈值，按返回条数截断」的语义，
-                // 与 KnowledgeServiceImpl.hitTest 的 text 语义对齐。
-                List<Map<String, Object>> kwRaw = jdbc.queryForList(kwSql, tsQuery, tsQuery, overFetch);
-                if ("mix".equals(mode)) {
-                    double kwThreshold = keywordThresholdOverride != null
-                            ? keywordThresholdOverride : props.getRetrieval().getKeywordThreshold();
-                    kwHits = filterByScore(kwRaw, kwThreshold);
-                } else {
-                    kwHits = kwRaw;
-                }
-            } catch (Exception e) {
-                log.warn("[HybridRetrieve] 关键词检索失败（库未就绪?）: {}", e.getMessage());
-                kwHits = List.of();
-            }
+        long started = System.currentTimeMillis();
+        List<Map<String, Object>> kwHits = awaitHits(kwFuture, kwTimeout, "关键词");
+        List<Map<String, Object>> vectorHits;
+        if (vecFuture.isDone()) {
+            vectorHits = awaitHits(vecFuture, 1, "向量");
+        } else if (!kwHits.isEmpty()) {
+            log.info("[HybridRetrieve] 关键词已命中 {} 条，不等向量", kwHits.size());
+            vectorHits = List.of();
+        } else {
+            long remain = Math.max(0, vecTimeout - (System.currentTimeMillis() - started));
+            vectorHits = awaitHits(vecFuture, remain, "向量");
         }
 
         // 3. 融合：embedding 单路用向量结果；text 单路用关键词结果；mix 加权融合。
@@ -455,6 +430,65 @@ public class HybridContentRetriever implements ContentRetriever {
         if (w < 0.0 || Double.isNaN(w)) return 0.0;
         if (w > 1.0) return 1.0;
         return w;
+    }
+
+    private List<Map<String, Object>> searchKeyword(String qText, String kbFilter, int overFetch,
+                                                    String mode, Double keywordThresholdOverride) {
+        String tsQuery = TsVectorGenerator.toTsQuery(qText);
+        String kwSql = "SELECT id, content, "
+                + "ts_rank_cd(tsv, websearch_to_tsquery('simple', ?)) AS score, metadata "
+                + "FROM chunks "
+                + "WHERE " + kbFilter + " "
+                + "AND tsv @@ websearch_to_tsquery('simple', ?) "
+                + "ORDER BY score DESC "
+                + "LIMIT ?";
+        try {
+            List<Map<String, Object>> kwRaw = jdbc.queryForList(kwSql, tsQuery, tsQuery, overFetch);
+            if ("mix".equals(mode)) {
+                double kwThreshold = keywordThresholdOverride != null
+                        ? keywordThresholdOverride : props.getRetrieval().getKeywordThreshold();
+                return filterByScore(kwRaw, kwThreshold);
+            }
+            return kwRaw;
+        } catch (Exception e) {
+            log.warn("[HybridRetrieve] 关键词检索失败（库未就绪?）: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    private List<Map<String, Object>> searchVector(String qText, String kbId, String kbFilter,
+                                                   double vectorThreshold, int overFetch) {
+        try {
+            EmbeddingModel embeddingModel = embeddingModelProvider.resolve(kbId);
+            Embedding qEmb = embeddingModel.embed(qText).content();
+            String vec = embToArray(qEmb);
+            String vecLiteral = "'" + vec + "'::vector";
+            String vectorSql = "SELECT id, content, 1 - (embedding <=> " + vecLiteral + ") AS score, metadata "
+                    + "FROM chunks "
+                    + "WHERE " + kbFilter + " "
+                    + "AND 1 - (embedding <=> " + vecLiteral + ") >= ? "
+                    + "ORDER BY embedding <=> " + vecLiteral + " "
+                    + "LIMIT ?";
+            return jdbc.queryForList(vectorSql, vectorThreshold, overFetch);
+        } catch (Exception e) {
+            log.warn("[HybridRetrieve] 向量检索失败（库未就绪?）: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    private List<Map<String, Object>> awaitHits(CompletableFuture<List<Map<String, Object>>> future,
+                                                long timeoutMs, String name) {
+        try {
+            return future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS).join();
+        } catch (Exception e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            if (cause instanceof TimeoutException || e instanceof TimeoutException) {
+                log.warn("[HybridRetrieve] {} 超时 {}ms，本路按空结果继续", name, timeoutMs);
+            } else {
+                log.warn("[HybridRetrieve] {} 失败: {}", name, cause.getMessage());
+            }
+            return List.of();
+        }
     }
 
     /**

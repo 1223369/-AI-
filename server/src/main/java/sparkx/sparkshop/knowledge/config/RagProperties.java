@@ -142,8 +142,15 @@ public class RagProperties {
          */
         private double hybridVectorWeight = 0.7;
         /**
-         * 单条检索通道最长等待（毫秒）。图谱抽实体 LLM 卡住时，超时丢弃该通道，
-         * 向量/关键词结果照常返回，避免整段检索被最慢一路拖到 2 分钟。
+         * 关键词路最长等待（毫秒）。本地 PG FTS，超时按空结果，不挡向量路。
+         */
+        private long keywordTimeoutMs = 1000;
+        /**
+         * 向量路最长等待（毫秒）。含 embedding 调用；超时仍把已完成的关键词结果交出去。
+         */
+        private long vectorTimeoutMs = 20000;
+        /**
+         * 图谱等非混合通道最长等待（毫秒）。不要用这个值去卡 hybrid / intent-directed。
          */
         private long channelTimeoutMs = 5000;
 
@@ -161,6 +168,10 @@ public class RagProperties {
         public void setMinHitsForExpansion(int minHitsForExpansion) { this.minHitsForExpansion = minHitsForExpansion; }
         public double getHybridVectorWeight() { return hybridVectorWeight; }
         public void setHybridVectorWeight(double hybridVectorWeight) { this.hybridVectorWeight = hybridVectorWeight; }
+        public long getKeywordTimeoutMs() { return keywordTimeoutMs; }
+        public void setKeywordTimeoutMs(long keywordTimeoutMs) { this.keywordTimeoutMs = keywordTimeoutMs; }
+        public long getVectorTimeoutMs() { return vectorTimeoutMs; }
+        public void setVectorTimeoutMs(long vectorTimeoutMs) { this.vectorTimeoutMs = vectorTimeoutMs; }
         public long getChannelTimeoutMs() { return channelTimeoutMs; }
         public void setChannelTimeoutMs(long channelTimeoutMs) { this.channelTimeoutMs = channelTimeoutMs; }
     }

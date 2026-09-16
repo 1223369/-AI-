@@ -1,11 +1,14 @@
 package sparkx.sparkshop.knowledge.pipeline.stages;
 
 import org.junit.jupiter.api.Test;
+import sparkx.sparkshop.knowledge.config.RagProperties;
 import sparkx.sparkshop.knowledge.intent.IntentNode;
 import sparkx.sparkshop.knowledge.intent.NodeScore;
+import sparkx.sparkshop.knowledge.retrieval.ConditionalRetrievalChannel;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -47,6 +50,32 @@ class RetrieveStageSkipKbTest {
     void strongUserKbRunsGraph() {
         assertTrue(sparkx.sparkshop.knowledge.graph.KnowledgeGraphChannel.shouldRunGraph(
                 List.of(kb("oa-rules", 0.80))));
+    }
+
+    @Test
+    void channelTimeoutsAreSplit() {
+        RagProperties.Retrieval r = new RagProperties.Retrieval();
+        r.setKeywordTimeoutMs(1000);
+        r.setVectorTimeoutMs(20000);
+        r.setChannelTimeoutMs(5000);
+        assertEquals(20500, stub(ConditionalRetrievalChannel.ChannelType.HYBRID_GLOBAL).timeoutMs(r));
+        assertEquals(20500, stub(ConditionalRetrievalChannel.ChannelType.INTENT_DIRECTED).timeoutMs(r));
+        assertEquals(5000, stub(ConditionalRetrievalChannel.ChannelType.KNOWLEDGE_GRAPH).timeoutMs(r));
+        assertEquals(1000, stub(ConditionalRetrievalChannel.ChannelType.KEYWORD).timeoutMs(r));
+    }
+
+    private static ConditionalRetrievalChannel stub(ConditionalRetrievalChannel.ChannelType type) {
+        return new ConditionalRetrievalChannel() {
+            @Override public String getName() { return type.name(); }
+            @Override public int getPriority() { return 1; }
+            @Override public boolean isEnabled(sparkx.sparkshop.knowledge.retrieval.RetrievalContext ctx) { return true; }
+            @Override public java.util.List<dev.langchain4j.rag.content.Content> retrieve(
+                    dev.langchain4j.rag.query.Query query,
+                    sparkx.sparkshop.knowledge.retrieval.RetrievalContext ctx) {
+                return List.of();
+            }
+            @Override public ChannelType getType() { return type; }
+        };
     }
 
     private static NodeScore mcp(String id, double score) {

@@ -17,7 +17,7 @@ import java.util.Optional;
 /**
  * 样例查询优先匹配阶段 —— @Order(5)，整条 RAG 链路的最前置。
  *
- * <p>用用户原始 query 直接走向量匹配样例库（{@code sample_query} 表），命中阈值则把样例答案
+ * <p>用用户原始 query 先关键词、再向量匹配样例库（{@code sample_query} 表），命中则把样例答案
  * 作为最终回答返回，<b>跳过改写/意图/检索/重排/兜底/生成全部阶段，LLM 不参与</b>。
  *
  * <p>★ 仅当智能体配置 {@code sampleQueryEnabled=1} 时执行（shouldRun 判定），
@@ -26,11 +26,11 @@ import java.util.Optional;
  * <p>★ 阈值优先级：智能体独立 {@code sampleQueryThreshold} 非空用它，否则回退全局
  * {@code sample_query_config.similarity_threshold}（默认 0.85）。
  *
-     * <p>★ 匹配限时 2s：命中才短路；超时/失败 CONTINUE 走 RAG，避免 embedding 把整轮对话拖死。
-     *
-     * <p>★ 短路约定（与 {@code GuidanceStage}/{@code VagueQueryClarifyStage} 一致的三步走）：
-     * tokenConsumer 推答案 → setAnswer → 返回 COMPLETE。命中 GenerateStage.shouldRun
-     * （{@code ctx.getAnswer()==null}）自动跳过生成。匹配失败/未命中返回 CONTINUE，主链路照常跑。
+ * <p>★ 有库时先关键词（约 1s），向量超时当未命中；空库 0ms 跳过。不挡主检索。
+ *
+ * <p>★ 短路约定（与 {@code GuidanceStage}/{@code VagueQueryClarifyStage} 一致的三步走）：
+ * tokenConsumer 推答案 → setAnswer → 返回 COMPLETE。命中 GenerateStage.shouldRun
+ * （{@code ctx.getAnswer()==null}）自动跳过生成。匹配失败/未命中返回 CONTINUE，主链路照常跑。
  */
 @Component
 @Order(5)

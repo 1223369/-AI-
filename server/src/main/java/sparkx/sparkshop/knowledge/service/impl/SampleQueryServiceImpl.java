@@ -27,8 +27,10 @@ import org.springframework.web.multipart.MultipartFile;
 import sparkx.sparkshop.common.exception.BusinessException;
 import sparkx.sparkshop.knowledge.entity.SampleQuery;
 import sparkx.sparkshop.knowledge.entity.SampleQueryConfig;
+import sparkx.sparkshop.knowledge.config.RagProperties;
 import sparkx.sparkshop.knowledge.ingest.SampleQueryIndexer;
 import sparkx.sparkshop.knowledge.infra.EmbeddingModelProvider;
+import sparkx.sparkshop.knowledge.infra.TsVectorGenerator;
 import sparkx.sparkshop.knowledge.mapper.SampleQueryConfigMapper;
 import sparkx.sparkshop.knowledge.mapper.SampleQueryMapper;
 import sparkx.sparkshop.knowledge.service.SampleQueryService;
@@ -85,8 +87,8 @@ public class SampleQueryServiceImpl implements SampleQueryService {
     /** 默认相似度阈值（与表 DDL DEFAULT 对齐） */
     private static final java.math.BigDecimal DEFAULT_THRESHOLD = new java.math.BigDecimal("0.850");
 
-    /** 问答路径样例匹配超时：超时未命中则立刻走 RAG，避免 embedding 把整轮对话拖到 20s+ */
-    private static final long MATCH_TIMEOUT_MS = 2000;
+    /** 样例向量匹配超时：超时当未命中，立刻走 RAG，不挡主检索 */
+    private static final long MATCH_VECTOR_TIMEOUT_MS = 2000;
 
     @Resource
     private SampleQueryMapper sampleQueryMapper;
@@ -106,6 +108,9 @@ public class SampleQueryServiceImpl implements SampleQueryService {
     @Resource
     @Qualifier("ragTaskExecutor")
     private Executor ragTaskExecutor;
+
+    @Resource
+    private RagProperties ragProperties;
 
     /**
      * 自注入代理对象：用于在 {@link #vectorizeBatch} 中调 {@link #doVectorizeBatchAsync}（{@code @Async}）。
@@ -426,22 +431,32 @@ public class SampleQueryServiceImpl implements SampleQueryService {
         if (query == null || query.isBlank()) {
             return Optional.empty();
         }
+        long kwTimeout = ragProperties.getRetrieval().getKeywordTimeoutMs() > 0
+                ? ragProperties.getRetrieval().getKeywordTimeoutMs() : 1000;
+        CompletableFuture<Optional<SampleQuery>> kwFuture = CompletableFuture.supplyAsync(
+                () -> matchKeyword(query), ragTaskExecutor);
+        CompletableFuture<Optional<SampleQuery>> vecFuture = CompletableFuture.supplyAsync(
+                () -> matchVector(query, thresholdOverride), ragTaskExecutor);
+        long started = System.currentTimeMillis();
+        Optional<SampleQuery> kwHit = awaitMatch(kwFuture, kwTimeout, "关键词", query);
+        if (kwHit.isPresent()) {
+            return kwHit;
+        }
+        long remain = Math.max(0, MATCH_VECTOR_TIMEOUT_MS - (System.currentTimeMillis() - started));
+        return awaitMatch(vecFuture, remain, "向量", query);
+    }
+
+    private Optional<SampleQuery> matchKeyword(String query) {
         try {
-            return CompletableFuture.supplyAsync(() -> matchNow(query, thresholdOverride), ragTaskExecutor)
-                    .orTimeout(MATCH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                    .join();
+            String tsQuery = TsVectorGenerator.toTsQuery(query);
+            return toSample(sampleQueryMapper.keywordSearch(tsQuery, 1));
         } catch (Exception e) {
-            Throwable cause = e.getCause() != null ? e.getCause() : e;
-            if (cause instanceof TimeoutException || e instanceof TimeoutException) {
-                log.warn("[SampleQuery] match 超时 {}ms，走 RAG q={}", MATCH_TIMEOUT_MS, query);
-            } else {
-                log.warn("[SampleQuery] match 失败 q={} : {}", query, cause.getMessage());
-            }
+            log.warn("[SampleQuery] 关键词匹配失败 q={} : {}", query, e.getMessage());
             return Optional.empty();
         }
     }
 
-    private Optional<SampleQuery> matchNow(String query, Double thresholdOverride) {
+    private Optional<SampleQuery> matchVector(String query, Double thresholdOverride) {
         SampleQueryConfig cfg = getConfig();
         double threshold = thresholdOverride != null ? thresholdOverride
                 : (cfg.getSimilarityThreshold() != null ? cfg.getSimilarityThreshold().doubleValue() : 0.85);
@@ -449,7 +464,26 @@ public class SampleQueryServiceImpl implements SampleQueryService {
                 cfg.getEmbeddingModelId(), cfg.getEmbeddingModelName());
         Embedding emb = embModel.embed(TextSegment.from(query)).content();
         String pgVec = SampleQueryIndexer.toPgVector(emb);
-        List<Map<String, Object>> rows = sampleQueryMapper.vectorSearch(pgVec, threshold, 1);
+        return toSample(sampleQueryMapper.vectorSearch(pgVec, threshold, 1));
+    }
+
+    private Optional<SampleQuery> awaitMatch(CompletableFuture<Optional<SampleQuery>> future,
+                                             long timeoutMs, String name, String query) {
+        try {
+            Optional<SampleQuery> hit = future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS).join();
+            return hit == null ? Optional.empty() : hit;
+        } catch (Exception e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            if (cause instanceof TimeoutException || e instanceof TimeoutException) {
+                log.warn("[SampleQuery] {} 超时 {}ms，当未命中 q={}", name, timeoutMs, query);
+            } else {
+                log.warn("[SampleQuery] {} 失败 q={} : {}", name, query, cause.getMessage());
+            }
+            return Optional.empty();
+        }
+    }
+
+    private static Optional<SampleQuery> toSample(List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) {
             return Optional.empty();
         }
